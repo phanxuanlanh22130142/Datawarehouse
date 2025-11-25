@@ -1,120 +1,98 @@
-import requests
-from bs4 import BeautifulSoup
 import pandas as pd
 from datetime import datetime
 import re
 import sys
 import os
-import numpy as np
 
+# Địa chỉ nguồn dữ liệu
 TARGET_URL = "https://giavang.org/"
-CSS_SELECTOR_TABLE = "table.table-bordered" 
 
 def clean_price_text(price_text):
-    """Chuẩn hóa sơ cấp: Loại bỏ dấu phân cách và đơn vị (chỉ giữ số)."""
+    """Chuẩn hóa: Loại bỏ dấu phân cách, đơn vị và chuyển sang chuỗi số."""
     if price_text:
-        return re.sub(r'[^0-9]', '', price_text).strip()
+        # Giữ lại số và dấu chấm, sau đó loại bỏ dấu chấm (nếu có) và chữ cái
+        cleaned = re.sub(r'[^0-9.]', '', price_text).strip()
+        # Loại bỏ dấu chấm nếu có
+        return cleaned.replace('.', '')
     return ''
 
-def run_gold_extractor(base_dir):
+def run_gold_extractor(base_dir): 
+    """Trích xuất dữ liệu, sử dụng pandas.read_html để xử lý cấu trúc bảng phức tạp."""
+    
     today_str = datetime.now().strftime("%d%m%Y")
     file_name = f"giavang_{today_str}.csv"
     output_path = os.path.join(base_dir, 'data', 'raw', file_name) 
 
     try:
-        response = requests.get(TARGET_URL, timeout=10)
-        response.raise_for_status() 
-        soup = BeautifulSoup(response.content, 'html.parser')
+        # Sử dụng pandas.read_html để đọc tất cả các bảng trên trang
+        # engine='lxml' sử dụng lxml để phân tích HTML, nhanh và ổn định hơn
+        tables = pd.read_html(TARGET_URL, flavor='lxml')
         
-        table = soup.select_one(CSS_SELECTOR_TABLE)
-        if not table:
-            print("LỖI EXTRACTOR: Không tìm thấy bảng.")
+        # Bảng giá vàng chính là bảng đầu tiên (chỉ mục 0)
+        # Chúng ta cần kiểm tra lại tiêu đề của bảng này, nếu không phải bảng đầu tiên thì chỉnh lại chỉ mục.
+        # Thường thì nó là bảng lớn nhất và quan trọng nhất.
+        if not tables:
+            print("LỖI EXTRACTOR: Không tìm thấy bảng nào trên trang.")
             return False
-
-        data_rows = []
+        
+        df = tables[0].copy() # Copy bảng đầu tiên (Bảng giá SJC, PNJ, DOJI)
+        
+        # 1. ĐẶT LẠI TÊN CỘT ĐÃ BIẾT
+        # Tên cột trong bảng HTML là: Khu vực, Hệ thống, Mua vào, Bán ra
+        df.columns = ['region_name_raw', 'brand_name_raw', 'buy_price_raw', 'sell_price_raw']
+        
+        # 2. XỬ LÝ ROWSPAN (Điền giá trị Khu vực bị thiếu)
+        # Pandas đọc ô gộp (rowspan) bằng cách điền NaN vào các dòng tiếp theo.
+        # Hàm fillna(method='ffill') sẽ điền giá trị Khu vực trước đó vào các ô NaN
+        df['region_name'] = df['region_name_raw'].fillna(method='ffill')
+        
+        # 3. LÀM SẠCH VÀ CHỌN CỘT
+        
+        # Áp dụng hàm làm sạch giá
+        df['buy_price_raw'] = df['buy_price_raw'].apply(clean_price_text)
+        df['sell_price_raw'] = df['sell_price_raw'].apply(clean_price_text)
+        
+        # Đặt timestamp
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        df['timestamp'] = current_time
         
-        # Biến tạm để lưu Khu vực hiện tại
-        current_region = "" 
-
-        rows = table.find_all('tr')
-        if rows:
-            rows = rows[1:] # Bỏ qua header row
+        # Chọn các cột cuối cùng
+        df_final = df[[
+            'region_name', 
+            'brand_name_raw', 
+            'buy_price_raw', 
+            'sell_price_raw', 
+            'timestamp'
+        ]]
         
-        for row in rows:
-            cols = row.find_all('td')
-            
-            # --- LOGIC XỬ LÝ ROWSPAN MỚI ---
-            
-            if not cols:
-                continue
+        # Đổi tên cột cho phù hợp với schema
+        df_final.columns = [
+            'region_name', 
+            'brand_name', 
+            'buy_price_raw', 
+            'sell_price_raw', 
+            'timestamp'
+        ]
 
-            # Vị trí bắt đầu của dữ liệu (Brand)
-            brand_index = 0
-            
-            # Nếu ô đầu tiên có thuộc tính rowspan, đó là ô Khu vực mới (4 cột)
-            if cols[0].has_attr('rowspan'):
-                
-                new_region = cols[0].text.strip()
-                if new_region:
-                    current_region = new_region # Lưu Khu vực mới
-                
-                # Dữ liệu Brand bắt đầu từ cột thứ 2 (chỉ số 1)
-                brand_index = 1
-                
-            # Nếu không có rowspan, nhưng có 3 cột, dữ liệu Brand bắt đầu từ cột 0
-            # Dùng Khu vực đã lưu (current_region)
-            elif len(cols) == 3:
-                brand_index = 0
-            
-            # Nếu không rơi vào 2 trường hợp trên (ví dụ: dòng trống hoặc cấu trúc lạ)
-            else:
-                continue
-
-            # Đảm bảo có đủ 3 cột dữ liệu (Brand, Buy, Sell)
-            if len(cols) > brand_index + 2:
-                brand = cols[brand_index].text.strip()
-                cleaned_buy = clean_price_text(cols[brand_index + 1].text)
-                cleaned_sell = clean_price_text(cols[brand_index + 2].text)
-            else:
-                continue
-
-            # --- THÊM DỮ LIỆU VÀO DANH SÁCH ---
-            # Chỉ thêm vào nếu brand_name và region_name không trống
-            if brand and current_region:
-                data_rows.append({
-                    'region_name': current_region, 
-                    'brand_name': brand,
-                    'buy_price_raw': cleaned_buy, 
-                    'sell_price_raw': cleaned_sell,
-                    'timestamp': current_time
-                })
-            
-
+        # Lọc bỏ các dòng không có giá trị
+        df_final.dropna(subset=['brand_name', 'buy_price_raw'], inplace=True)
+        
         # Ghi dữ liệu vào đường dẫn output động
-        df = pd.DataFrame(data_rows)
-        
-        # Loại bỏ các dòng mà brand_name hoặc buy_price bị trống
-        df.replace('', np.nan, inplace=True)
-        df.dropna(subset=['brand_name', 'buy_price_raw'], inplace=True)
-        
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        df.to_csv(output_path, index=False, encoding='utf-8')
+        df_final.to_csv(output_path, index=False, encoding='utf-8')
         
-        print(f"Đã trích xuất thành công: {output_path}. Số dòng: {len(df)}")
+        print(f"Đã trích xuất thành công bằng Pandas: {output_path}. Số dòng: {len(df_final)}")
         return True
 
-    except requests.exceptions.RequestException as e:
-        print(f"LỖI KẾT NỐI: Không thể truy cập {TARGET_URL}. {e}")
+    except ValueError as e:
+        print(f"LỖI READ_HTML: Không thể tìm thấy bảng HTML. {e}")
         return False
     except Exception as e:
-        print(f"LỖI CHUNG KHI TRÍCH XUẤT: {e}")
+        print(f"LỖỖ CHUNG KHI TRÍCH XUẤT: {e}")
         return False
 
 if __name__ == "__main__":
-    base_directory = os.environ.get("BASE_DIR", ".") 
-    
-    if run_gold_extractor(base_directory):
+    if run_gold_extractor(os.environ.get("BASE_DIR", ".")):
         sys.exit(0)
     else:
         sys.exit(1)

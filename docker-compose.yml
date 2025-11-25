@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  # SERVICE 1: DATABASE STAGING & WAREHOUSE (MYSQL)
+  # Chúng ta sử dụng một service duy nhất cho MySQL để đơn giản hóa cấu hình.
+  db_staging:
+    image: mysql:8.0
+    container_name: mysql-staging-db
+    restart: always
+    environment:
+      # Thông số đăng nhập
+      MYSQL_ROOT_PASSWORD: root_password_local 
+      MYSQL_DATABASE: db_staging
+    ports:
+      - "3307:3306" # Mở cổng 3306 ra máy Windows để Navicat kết nối (Như hình ảnh bạn đã gửi)
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql
+
+  # SERVICE 2: CHẠY CÁC SCRIPT PYTHON (ETL Runner - Dành cho các tác vụ 1 lần)
+  etl_runner:
+    build: .
+    container_name: etl-python-runner
+    depends_on:
+      - db_staging
+    volumes:
+      - .:/app 
+    environment:
+      DB_HOST: mysql-staging-db # Sử dụng tên container service của MySQL
+      DB_USER: root
+      DB_PASSWORD: root_password_local
+      DB_NAME: db_staging
+    # Lệnh mặc định nếu chạy bằng 'docker compose up' (Bạn có thể bỏ qua command này)
+    # command: /bin/bash -c "python3 scripts/extract_data.py && python3 scripts/load_staging.py && python3 scripts/transform_data.py" 
+    
+  # SERVICE 3: FLASK API SERVER (Dành cho Dashboard - Cần chạy liên tục)
+  api_server:
+    build: .
+    container_name: gold-api-server
+    depends_on:
+      - db_staging # Phụ thuộc DB
+    volumes:
+      - .:/app 
+    environment:
+      # Biến môi trường cần thiết cho api.py
+      MYSQL_USER: root
+      MYSQL_PASSWORD: root_password_local
+    ports:
+      - "5000:5000" # Mở cổng 5000
+    command: python3 scripts/api.py
+
+volumes:
+  mysql_data:
