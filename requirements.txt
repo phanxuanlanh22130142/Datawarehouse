@@ -1,3 +1,8 @@
 pandas
 numpy
 lxml
+mysql-connector-python
+flask
+mysql-connector-python
+pandas
+flask-cors  # Đã thêm
